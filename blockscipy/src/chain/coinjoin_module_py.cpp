@@ -315,7 +315,7 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
             pybind11::arg("input_output_ratio"), pybind11::arg("coinjoin_type"), pybind11::arg("hops"))
         .def(
             "compute_anonymity_degradation",
-            [](Blockchain &chain, BlockHeight start, BlockHeight stop, int daysToConsider, std::string coinjoinType) {
+            [](Blockchain &chain, BlockHeight start, BlockHeight stop, int daysToConsider, std::string coinjoinType, std::optional<std::string> coinjoinSubType) {
                 // CJTX and its anonymity sets
                 using AnonymitySetsFuncType = std::unordered_map<Transaction, std::unordered_map<int64_t, int64_t>>;
                 // For txes which consolidate inputs from multiple cjtxes. CJTX = Transaction, map = <value, count>
@@ -325,7 +325,7 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                     std::unordered_map<Transaction, std::unordered_map<int64_t, int64_t>>;
 
                 auto filteringFunc = [&](const Transaction &tx) -> bool {
-                    return blocksci::heuristics::isCoinjoinOfGivenType(tx, coinjoinType);
+                    return blocksci::heuristics::isCoinjoinOfGivenType(tx, coinjoinType, coinjoinSubType);
                 };
 
                 auto mapFunc = [&](const Transaction &tx) -> AnonymitySetsFuncType {
@@ -433,18 +433,23 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                     }
                 }
 
-                std::unordered_map<Transaction, double> result;
+                std::unordered_map<Transaction, std::pair<double, int64_t>> result;
                 for (const auto &[tx, anonymitySets] : initialAnonymitySets) {
                     double resultValue = 0;
+                    int64_t totalCount = 0;
+                    if (coinjoinType == "wasabi1") {
+                        // take only standard denominations
+                    }
                     for (const auto &[key, value] : anonymitySets) {
                         resultValue += lgamma(value + 1) / log(2);
+                        totalCount += value;
                     }
-                    result[tx] = resultValue;
+                    result[tx] = std::make_pair(resultValue, totalCount);
                 }
 
                 return result;
             },
             "Compute anonymity degradation in coinjoins", pybind11::arg("start"), pybind11::arg("stop"),
-            pybind11::arg("daysToConsider"), pybind11::arg("coinjoinType"));
+            pybind11::arg("daysToConsider"), pybind11::arg("coinjoinType"), pybind11::arg("coinjoinSubType") = py::none());
     ;
 }

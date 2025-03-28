@@ -73,7 +73,7 @@ namespace blocksci {
      * 
      * @return true if the transaction is a coinjoin of the given type, false otherwise
      */
-    bool BLOCKSCI_EXPORT isCoinjoinOfGivenType(const Transaction &tx, const std::string &type);
+    bool BLOCKSCI_EXPORT isCoinjoinOfGivenType(const Transaction &tx, const std::string &type, std::optional<std::string> subtype = std::nullopt);
 
     /**
      * Given a transaction, return the type of coinjoin it is.

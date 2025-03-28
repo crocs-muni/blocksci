@@ -881,13 +881,32 @@ namespace heuristics {
         return ConsolidationType::None;
     }
 
-    bool isCoinjoinOfGivenType(const Transaction &tx, const std::string &type) {
+    bool isCoinjoinOfGivenType(const Transaction &tx, const std::string &type, std::optional<std::string> subtype) {
         if (type == "wasabi1") {
             return isWasabi1CoinJoin(tx);
         } else if (type == "wasabi2") {
             return isWasabi2CoinJoin(tx);
         } else if (type == "whirlpool") {
-            return isWhirlpoolCoinJoin(tx);
+            auto isWhirlpool = isWhirlpoolCoinJoin(tx);
+            if (!isWhirlpool) {
+                return false;
+            }
+            if (!subtype.has_value()) {
+                return isWhirlpool;
+            }
+            // 0.001 BTC, 0.01 BTC, 0.05 BTC, and 0.5 BTC (to satoshis)
+            if (subtype.value() == "50m") {
+                return tx.inputs()[0].getValue() == 50000000;
+            } else if (subtype.value() == "5m") {
+                return tx.inputs()[0].getValue() == 5000000;
+            } else if (subtype.value() == "1m") {
+                return tx.inputs()[0].getValue() == 1000000;
+            } else if (subtype.value() == "100k") {
+                return tx.inputs()[0].getValue() == 100000;
+            } else {
+                return false;
+            }
+
         } else {
             return false;
         }
