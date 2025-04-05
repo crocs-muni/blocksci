@@ -315,7 +315,15 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
             pybind11::arg("input_output_ratio"), pybind11::arg("coinjoin_type"), pybind11::arg("hops"))
         .def(
             "compute_anonymity_degradation",
-            [](Blockchain &chain, BlockHeight start, BlockHeight stop, int daysToConsider, std::string coinjoinType, std::optional<std::string> coinjoinSubType) {
+            [](
+                Blockchain &chain, 
+                BlockHeight start, 
+                BlockHeight stop, 
+                int daysToConsider, 
+                std::string coinjoinType, 
+                std::optional<std::string> coinjoinSubType, 
+                std::optional<bool> ignoreNonStandardDenominations
+            ) {
                 // CJTX and its anonymity sets
                 using AnonymitySetsFuncType = std::unordered_map<Transaction, std::unordered_map<int64_t, int64_t>>;
                 // For txes which consolidate inputs from multiple cjtxes. CJTX = Transaction, map = <value, count>
@@ -328,7 +336,27 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                     return blocksci::heuristics::isCoinjoinOfGivenType(tx, coinjoinType, coinjoinSubType);
                 };
 
-                auto mapFunc = [&](const Transaction &tx) -> AnonymitySetsFuncType {
+
+                auto shouldIgnoreDenomination = [&](const int64_t &outputValue) -> bool {
+                    if (!ignoreNonStandardDenominations.has_value() || !ignoreNonStandardDenominations.value()) {
+                        return false;
+                    }
+                    if (coinjoinType == "whirlpool") {
+                        return false;
+                    }
+                    // Check if the output is a standard denomination
+                    if (coinjoinType == "wasabi1") {
+                        return outputValue > 0.12 * 1e8 || outputValue < 0.08 * 1e8;
+                    }
+                    if (coinjoinType == "wasabi2") {
+                        return CoinjoinUtils::ww2_denominations.find(outputValue) == CoinjoinUtils::ww2_denominations.end();
+                    }
+
+                    return false;
+                    
+                };
+
+                auto getSizesOfAnonymitySetsPerOutput = [&](const Transaction &tx) -> AnonymitySetsFuncType {
                     if (!filteringFunc(tx)) {
                         return {};
                     }
@@ -337,6 +365,9 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                     auto anonymitySets = std::unordered_map<int64_t, int64_t>();
 
                     for (const auto &output : tx.outputs()) {
+                        if (shouldIgnoreDenomination(output.getValue())) {
+                            continue;
+                        }
                         anonymitySets[output.getValue()]++;
                     }
 
@@ -344,18 +375,18 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                     return result;
                 };
 
-                auto reduceFunc = [](AnonymitySetsFuncType &map1,
+                auto combineAnonymitySetSizes = [](AnonymitySetsFuncType &map1,
                                      AnonymitySetsFuncType &map2) -> AnonymitySetsFuncType & {
                     for (const auto &[key, value] : map2) {
                         if (map1.find(key) == map1.end()) {
                             map1[key] = value;
-                        } else {
-                            for (const auto &[key2, value2] : value) {
-                                if (map1[key].find(key2) == map1[key].end()) {
-                                    map1[key][key2] = value2;
-                                } else {
-                                    map1[key][key2] += value2;
-                                }
+                            continue;
+                        } 
+                        for (const auto &[key2, value2] : value) {
+                            if (map1[key].find(key2) == map1[key].end()) {
+                                map1[key][key2] = value2;
+                            } else {
+                                map1[key][key2] += value2;
                             }
                         }
                     }
@@ -363,10 +394,10 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                 };
 
                 auto initialAnonymitySets =
-                    chain[{start, stop}].mapReduce<AnonymitySetsFuncType, decltype(mapFunc), decltype(reduceFunc)>(
-                        mapFunc, reduceFunc);
+                    chain[{start, stop}].mapReduce<AnonymitySetsFuncType, decltype(getSizesOfAnonymitySetsPerOutput), decltype(combineAnonymitySetSizes)>(
+                        getSizesOfAnonymitySetsPerOutput, combineAnonymitySetSizes);
 
-                auto mapFunc2 = [&](const Transaction &tx) -> PointingToTransactionsType {
+                auto decreaseAnonymityIfConsolidated = [&](const Transaction &tx) -> PointingToTransactionsType {
                     PointingToTransactionsType result;
                     auto coinJoinTag = blocksci::heuristics::getCoinjoinTag(tx);
                     if (coinJoinTag != blocksci::heuristics::CoinJoinType::None) {
@@ -379,6 +410,10 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                         }
 
                         if (initialAnonymitySets.find(inputTx) == initialAnonymitySets.end()) {
+                            continue;
+                        }
+
+                        if (shouldIgnoreDenomination(input.getValue())) {
                             continue;
                         }
 
@@ -403,7 +438,7 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                     return sum > 1 ? result : PointingToTransactionsType{};
                 };
 
-                auto reduceFunc2 = [&](PointingToTransactionsType &map1,
+                auto combineDataAfterAnonymityLoss = [&](PointingToTransactionsType &map1,
                                        PointingToTransactionsType &map2) -> PointingToTransactionsType & {
                     for (const auto &[tx, anonymitySets] : map2) {
                         if (map1.find(tx) == map1.end()) {
@@ -423,8 +458,8 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                 if (daysToConsider > 0) {
                     auto pointingToTransactions =
                         chain[{start, stop}]
-                            .mapReduce<PointingToTransactionsType, decltype(mapFunc2), decltype(reduceFunc2)>(
-                                mapFunc2, reduceFunc2);
+                            .mapReduce<PointingToTransactionsType, decltype(decreaseAnonymityIfConsolidated), decltype(combineDataAfterAnonymityLoss)>(
+                                decreaseAnonymityIfConsolidated, combineDataAfterAnonymityLoss);
 
                     for (const auto &[tx, anonymitySets] : pointingToTransactions) {
                         for (const auto &[value, count] : anonymitySets) {
@@ -437,9 +472,7 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                 for (const auto &[tx, anonymitySets] : initialAnonymitySets) {
                     double resultValue = 0;
                     int64_t totalCount = 0;
-                    if (coinjoinType == "wasabi1") {
-                        // take only standard denominations
-                    }
+                    
                     for (const auto &[key, value] : anonymitySets) {
                         resultValue += lgamma(value + 1) / log(2);
                         totalCount += value;
@@ -450,6 +483,6 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                 return result;
             },
             "Compute anonymity degradation in coinjoins", pybind11::arg("start"), pybind11::arg("stop"),
-            pybind11::arg("daysToConsider"), pybind11::arg("coinjoinType"), pybind11::arg("coinjoinSubType") = py::none());
+            pybind11::arg("daysToConsider"), pybind11::arg("coinjoinType"), pybind11::arg("coinjoinSubType") = py::none(), pybind11::arg("ignoreNonStandardDenominations") = false);
     ;
 }
