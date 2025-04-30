@@ -45,7 +45,7 @@ namespace blocksci {
      * 
      * @return true if the transaction is a Wasabi 2 CoinJoin, false otherwise
      */
-    bool BLOCKSCI_EXPORT isWasabi2CoinJoin(const Transaction &tx, std::optional<uint64_t> inputCount = std::nullopt);
+    bool BLOCKSCI_EXPORT isWasabi2CoinJoin(const Transaction &tx, std::optional<uint64_t> inputCount = std::nullopt, bool debug = false);
     
     /** 
      * Wasabi 1 CoinJoin detection, ported from Dumplings.

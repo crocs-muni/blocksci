@@ -14,6 +14,8 @@ cd /mnt/blocksci
 
 cd /mnt/blocksci
 
+pip3 install -r pip-all-requirements.txt || exit 1
+
 pip3 install jupyter notebook
 pip3 install jupyter_contrib_nbextensions
 jupyter contrib nbextension install --user

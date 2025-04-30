@@ -22,4 +22,5 @@ cmake-build-debug
 
 *.png
 *.pdf
+results/
 .Trash-0/
