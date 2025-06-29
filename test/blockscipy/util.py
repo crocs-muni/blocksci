@@ -6,7 +6,7 @@ FEE = 0.0001
 
 def correct_timestamp(ts):
     tz = get_localzone()
-    ts_local = tz.localize(ts)
+    ts_local = ts.replace(tzinfo=tz)
     return ts_local.astimezone(pytz.utc)
 
 
