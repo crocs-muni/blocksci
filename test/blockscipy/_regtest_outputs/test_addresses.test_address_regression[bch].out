@@ -75,7 +75,7 @@ True
 Tx(len(txins)=1, len(txouts)=1, size_bytes=193, block_height=115, tx_index=124)
 Pay to script hash
 scripthash/pubkey
-PubkeyAddress(mr6VKoQ9zMau7CSNaf1QBzy6Pw3DmMPrWm)
+mr6VKoQ9zMau7CSNaf1QBzy6Pw3DmMPrWm
 2N1otuhuzEiwReoLqqrJKTk67A2aW5ZXXDW
 0
 EquivAddress(PubkeyAddress(mjAzMtZc7UFuvuRqJyhrrVXHQKoY5UhG6R), ScriptHashAddress(2N1otuhuzEiwReoLqqrJKTk67A2aW5ZXXDW))
@@ -90,7 +90,7 @@ True
 Tx(len(txins)=1, len(txouts)=1, size_bytes=193, block_height=116, tx_index=127)
 Pay to script hash
 scripthash/pubkey
-PubkeyAddress(mjAzMtZc7UFuvuRqJyhrrVXHQKoY5UhG6R)
+mjAzMtZc7UFuvuRqJyhrrVXHQKoY5UhG6R
 0
 EquivAddress(MultisigAddress(2 of 3))
 True
