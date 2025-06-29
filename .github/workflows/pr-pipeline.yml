@@ -1,0 +1,42 @@
+name: Python Tests
+
+on:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-20.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Set up system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-7 g++-7
+
+      - name: Set up Python 3.8
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.8'
+
+      - name: Build BlockSci
+        run: |
+          mkdir build && cd build
+          CC=gcc-7 CXX=g++-7 cmake -DCMAKE_BUILD_TYPE=Release ..
+          make -j2
+          sudo make install
+          sudo ldconfig
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r pip-all-requirements.txt
+          cd blockscipy
+          CC=gcc-7 CXX=g++-7 pip install -e .
+
+      - name: Run tests
+        continue-on-error: true
+        run: pytest test/blockscipy 
