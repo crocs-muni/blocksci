@@ -585,7 +585,6 @@ namespace heuristics {
     bool _isWasabi1StaticCoordinator(const Transaction &tx) {
         std::unordered_map<int64_t, int> outputValues;
         bool is_coord_output = false;
-        bool more_than_two_outputs = false;
 
         for (auto output : tx.outputs()) {
             outputValues[output.getValue()]++;
@@ -609,8 +608,6 @@ namespace heuristics {
         if (outputValues.size() < 2) {
             return false;
         }
-
-        auto moreThanTwice = 0;
 
         for (auto &output : outputValues) {
             if (output.second > 2) {
@@ -696,29 +693,38 @@ namespace heuristics {
      * Wasabi2 CoinJoin detection heuristic.
      * Ported from Dumplings
      */
-    bool isWasabi2CoinJoin(const Transaction &tx, std::optional<uint64_t> inputCount) {
+    bool isWasabi2CoinJoin(const Transaction &tx, std::optional<uint64_t> inputCount, bool debug) {
         // first ww2 coinjoin block
 
         auto blockHeight = tx.getBlockHeight();
         if (blockHeight < blocksci::CoinjoinUtils::FirstWasabi2Block) {
             return false;
         }
-        auto inputLimit = blockHeight < 850237 ? 50 : 40;
+        auto inputLimit = blockHeight < 850237 ? 50 : 20;
         for (const auto &input : tx.inputs()) {
             if (input.getType() != AddressType::Enum::WITNESS_PUBKEYHASH &&
                 input.getType() != AddressType::Enum::WITNESS_UNKNOWN) {
+                if (debug) {
+                    std::cout << "Input type: " << input.getType() << std::endl;
+                }
                 return false;
             }
         }
         for (const auto &output : tx.outputs()) {
             if (output.getType() != AddressType::Enum::WITNESS_PUBKEYHASH &&
                 output.getType() != AddressType::Enum::WITNESS_UNKNOWN) {
+                if (debug) {
+                    std::cout << "Output type: " << output.getType() << std::endl;
+                }
                 return false;
             }
         }
 
         if ((inputCount.has_value() && tx.inputCount() != inputCount) ||
             (!inputCount.has_value() && tx.inputCount() < inputLimit)) {
+            if (debug) {
+                std::cout << "Input count: " << tx.inputCount() << std::endl;
+            }
             return false;
         }
 
@@ -728,6 +734,9 @@ namespace heuristics {
         std::unordered_set<std::string> usedWitnessUnknownAddresses;
         for (const auto &input : tx.inputs()) {
             if (prev_input_value != -1 && input.getValue() > prev_input_value) {
+                if (debug) {
+                    std::cout << "Input value: " << input.getValue() << std::endl;
+                }
                 return false;
             }
 
@@ -747,6 +756,10 @@ namespace heuristics {
         }
 
         if (usedAddresses.size() + usedWitnessUnknownAddresses.size() < 5) {
+            if (debug) {
+                std::cout << "Input addresses: " << usedAddresses.size() << " + " << usedWitnessUnknownAddresses.size()
+                          << std::endl;
+            }
             return false;
         }
 
@@ -758,6 +771,9 @@ namespace heuristics {
         int count = 0;
         for (const auto &output : tx.outputs()) {
             if (prev_output_value != -1 && output.getValue() > prev_output_value) {
+                if (debug) {
+                    std::cout << "Output value: " << output.getValue() << std::endl;
+                }
                 return false;
             }
 
@@ -780,10 +796,17 @@ namespace heuristics {
             }
         }
         if (usedAddresses.size() + usedWitnessUnknownAddresses.size() < 5) {
+            if (debug) {
+                std::cout << "Output addresses: " << usedAddresses.size() << " + " << usedWitnessUnknownAddresses.size()
+                          << std::endl;
+            }
             return false;
         }
 
-        return count > (tx.outputCount() * 0.8);
+        if (debug) {
+            std::cout << "Output count: " << count << ", " << tx.outputCount() * (blockHeight < 850237 ? 0.8 : 0.75)<< std::endl;
+        }
+        return count > (tx.outputCount() * (blockHeight < 850237 ? 0.8 : 0.75));
     }
 
     /**
@@ -881,13 +904,32 @@ namespace heuristics {
         return ConsolidationType::None;
     }
 
-    bool isCoinjoinOfGivenType(const Transaction &tx, const std::string &type) {
+    bool isCoinjoinOfGivenType(const Transaction &tx, const std::string &type, std::optional<std::string> subtype) {
         if (type == "wasabi1") {
             return isWasabi1CoinJoin(tx);
         } else if (type == "wasabi2") {
             return isWasabi2CoinJoin(tx);
         } else if (type == "whirlpool") {
-            return isWhirlpoolCoinJoin(tx);
+            auto isWhirlpool = isWhirlpoolCoinJoin(tx);
+            if (!isWhirlpool) {
+                return false;
+            }
+            if (!subtype.has_value()) {
+                return isWhirlpool;
+            }
+            // 0.001 BTC, 0.01 BTC, 0.05 BTC, and 0.5 BTC (to satoshis)
+            if (subtype.value() == "50m") {
+                return tx.inputs()[0].getValue() == 50000000;
+            } else if (subtype.value() == "5m") {
+                return tx.inputs()[0].getValue() == 5000000;
+            } else if (subtype.value() == "1m") {
+                return tx.inputs()[0].getValue() == 1000000;
+            } else if (subtype.value() == "100k") {
+                return tx.inputs()[0].getValue() == 100000;
+            } else {
+                return false;
+            }
+
         } else {
             return false;
         }
