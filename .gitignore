@@ -24,3 +24,4 @@ cmake-build-debug
 *.pdf
 results/
 .Trash-0/
+.cache/

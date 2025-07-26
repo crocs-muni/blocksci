@@ -23,6 +23,11 @@ jupyter contrib nbextension install --user
 
 CC=gcc-7 CXX=g++-7 pip3 install -e blockscipy || exit 1
 
+##### COMPILE COMMANDS JSON MERGE FOR DEVELOPMENT #####
+cp build/compile_commands.json build/compile_commands.json.backup
+jq -s 'add' build/compile_commands.json blockscipy/build/temp.linux-x86_64-3.8/compile_commands.json > build/compile_commands_merged.json
+mv build/compile_commands_merged.json build/compile_commands.json
+
 cd Notebooks
 
 jupyter notebook --ip="0.0.0.0" --allow-root || exit 1
