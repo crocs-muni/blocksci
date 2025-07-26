@@ -4,8 +4,8 @@
 #define coinjoin_cluster_manager_hpp
 
 #include <blocksci/blocksci_export.h>
-#include <blocksci/heuristics/tx_identification.hpp>
 
+#include <blocksci/heuristics/tx_identification.hpp>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -67,7 +67,7 @@ namespace blocksci {
          * @param clusteringFunc Clustering heuristic function
          * @param outputPath Path to output directory
          * @param overwrite Overwrite existing cluster data
-         * @param coinjoinType Type of CoinJoin transactions to cluster (wasabi1, wasabi2, whirlpool)
+         * @param coinjoinType Type of CoinJoin transactions to cluster (wasabi1, wasabi2, whirlpool, ashigaru)
          * @param maxHops Maximum number of hops to collect addresses around CoinJoin transactions
          * @return CoinjoinClusterManager instance
          */

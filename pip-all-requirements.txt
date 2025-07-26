@@ -15,7 +15,7 @@ chardet==3.0.4
 charset-normalizer==3.4.0
 comm==0.2.2
 contourpy==1.1.1
-cycler==0.12.7
+cycler==0.12.1
 dateparser==1.2.0
 dbus-python==1.2.16
 debugpy==1.8.7

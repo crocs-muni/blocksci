@@ -137,6 +137,7 @@ namespace blocksci {
         static inline int64_t FirstWasabiBlock = 530500;
         static inline int64_t FirstSamouraiBlock = 570000;
         static inline int64_t FirstWasabiNoCoordAddressBlock = 610000;
+        static inline int64_t FirstAshigaruBlock = 890000;  // a guess, but yea
     };
 
 }  // namespace blocksci
