@@ -6,11 +6,13 @@
 #include <blocksci/cluster/cluster.hpp>
 #include <blocksci/heuristics/tx_identification.hpp>
 #include <blocksci/scripts/script_range.hpp>
-#include <numeric>
 #include <optional>
 #include <queue>
+#include <string>
+#include <unordered_set>
 
 #include "../external/json/single_include/nlohmann/json.hpp"
+#include "blocksci/chain/output.hpp"
 #include "caster_py.hpp"
 #include "sequence.hpp"
 
@@ -63,6 +65,106 @@ std::unordered_set<Transaction> findLinkedCjTxes(
         }
     }
     return result;
+}
+
+using LevelType = uint32_t;
+using ConsolidationTxCountType = std::unordered_set<Output>;
+using OneTxConsolidationType = std::unordered_map<Transaction, ConsolidationTxCountType>;
+using ConsolidationType = std::unordered_map<LevelType, OneTxConsolidationType>;
+using ConsolidationResultType = std::unordered_map<Transaction, ConsolidationType>;
+
+ConsolidationResultType get_consolidations_for_tx(const Transaction &tx, int maxLevel, std::string coinjoinType) {
+    ConsolidationResultType result;
+    result[tx] = {};
+    if (!blocksci::heuristics::isCoinjoinOfGivenType(tx, coinjoinType)) {
+        return result;
+    }
+
+    // we build the first level of the consolidation tree by transactions that directly
+    // spend the outputs of the coinjoin tx and possibly consolidate them.
+    // Then we build other levels by merging the sets of outputs of the transactions in the previous level.
+    std::unordered_map<Transaction, std::unordered_set<Output>> seen;
+    std::unordered_set<Transaction> bfsProcessed;
+    std::queue<std::pair<const Transaction &, int>> bfsQueue;
+    std::unordered_map<int, std::unordered_set<Transaction>> txesByLevel;
+    bfsQueue.push({tx, 0});
+    bfsProcessed.insert(tx);
+    seen[tx] = {};
+
+    while (!bfsQueue.empty()) {
+        auto [currentTx, level] = bfsQueue.front();
+        bfsQueue.pop();
+        for (const auto &output : currentTx.outputs()) {
+            if (!output.isSpent()) continue;
+            auto spendingTx = output.getSpendingTx().value();
+            if (bfsProcessed.find(spendingTx) != bfsProcessed.end()) {
+                continue;
+            }
+            bfsProcessed.insert(spendingTx);
+            bfsQueue.push({spendingTx, level + 1});
+            if (level + 1 > maxLevel) {
+                continue;
+            }
+            if (seen.find(spendingTx) == seen.end()) {
+                seen[spendingTx] = {};
+            }
+            if (txesByLevel.find(level) == txesByLevel.end()) {
+                txesByLevel[level] = {};
+            }
+            txesByLevel[level].insert(spendingTx);
+
+            for (const auto &input : spendingTx.inputs()) {
+                auto inputTx = input.getSpentTx();
+                // if the input tx is the base tx (coinjoin tx), then we add the output directly to this tx's result
+                if (inputTx == tx) {
+                    seen[spendingTx].insert(input.getSpentOutput());
+                    continue;
+                }
+
+                // as we go by levels (bfs), if we haven't seen the input tx, then it's out of the scope
+                if (seen.find(inputTx) == seen.end()) {
+                    continue;
+                }
+
+                // otherwise we say this tx from this level consolidates all outputs of the previous level
+                for (const auto &foundOutput : seen[inputTx]) {
+                    seen[spendingTx].insert(foundOutput);
+                }
+            }
+        }
+    }
+    for (const auto &[level, txes] : txesByLevel) {
+        for (const auto &processedTx : txes) {
+            if (result[tx].find(level) == result[tx].end()) {
+                result[tx][level] = {};
+            }
+            if (result[tx][level].find(processedTx) == result[tx][level].end()) {
+                result[tx][level][processedTx] = {};
+            }
+            result[tx][level][processedTx] = seen[processedTx];
+        }
+    }
+
+    return result;
+}
+
+ConsolidationResultType get_coinjoin_consolidations(Blockchain &chain, BlockHeight start, BlockHeight stop,
+                                                    std::string coinjoinType, int maxLevel) {
+    ConsolidationResultType result;
+
+    using MapType = ConsolidationResultType;
+    auto reduceFunc = [](MapType &our, MapType &their) -> MapType & {
+        for (const auto &[tx, consolidations] : their) {
+            our[tx] = consolidations;
+        }
+        return our;
+    };
+
+    auto mapFunc = [&](const Transaction &tx) -> MapType {
+        return get_consolidations_for_tx(tx, maxLevel, coinjoinType);
+    };
+
+    return chain[{start, stop}].mapReduce<MapType, decltype(mapFunc), decltype(reduceFunc)>(mapFunc, reduceFunc);
 }
 
 void init_coinjoin_module(py::class_<Blockchain> &cl) {
@@ -451,9 +553,9 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
 
                 // CJTX and its anonymity sets
                 using AnonymitySetsFuncType = std::unordered_map<Transaction, std::unordered_map<int64_t, int64_t>>;
-                // For txes which consolidate inputs from multiple cjtxes. CJTX = Transaction, map = <value, count>
-                // value = the anonymity set, count = how many times it appears in the consolidation tx (how much it
-                // degrades the anonymity set)
+                // For txes which consolidate inputs from multiple cjtxes. CJTX = Transaction, map = <value,
+                // count> value = the anonymity set, count = how many times it appears in the consolidation tx
+                // (how much it degrades the anonymity set)
                 using PointingToTransactionsType =
                     std::unordered_map<Transaction, std::unordered_map<int64_t, int64_t>>;
 

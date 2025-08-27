@@ -944,7 +944,7 @@ namespace blocksci {
             });
         }
 
-        bool isJoinMarketCoinJoin(const Transaction &tx) {
+        bool isJoinMarketCoinJoin_100k(const Transaction &tx) {
             // As the format identified at the end of section 2.1 is relatively broad - a standardized output and a
             // change output for each participant - it is likely we will detect transactions from other protocols or
             // softwares.
@@ -954,6 +954,10 @@ namespace blocksci {
 
             std::unordered_map<int64_t, int> output_values;
             for (const auto &output : tx.outputs()) {
+                // if there is any OP_RETURN output, it's not a joinmarket transaction
+                if (output.getAddress().getType() == AddressType::Enum::NULL_DATA) {
+                    return false;
+                }
                 output_values[output.getValue()]++;
             }
 
@@ -967,7 +971,13 @@ namespace blocksci {
 
             int n = most_frequent_output->second;
 
-            if (n < 3) {  // Minimum 3 participants
+            // max 1 repeated output, all the change outputs are different
+            if (std::any_of(output_values.begin(), output_values.end(),
+                            [n](const std::pair<int64_t, int> &a) { return a.second != n && a.second > 1; })) {
+                return false;
+            }
+
+            if (n < 5) {  // Minimum 5 participants
                 return false;
             }
 
@@ -990,6 +1000,195 @@ namespace blocksci {
             }
 
             return output_scripts.size() == tx.outputCount();
+        }
+
+        // Helper function to check if a script type is segwit
+        bool isSegwitType(AddressType::Enum type) {
+            return type == AddressType::Enum::WITNESS_PUBKEYHASH || type == AddressType::Enum::WITNESS_SCRIPTHASH ||
+                   type == AddressType::Enum::WITNESS_UNKNOWN;  // includes P2TR
+        }
+
+        // Helper function to check if a script type is standard spend type
+        bool isStandardSpendType(AddressType::Enum type) {
+            return type == AddressType::Enum::PUBKEY || type == AddressType::Enum::PUBKEYHASH ||
+                   type == AddressType::Enum::SCRIPTHASH || type == AddressType::Enum::WITNESS_PUBKEYHASH ||
+                   type == AddressType::Enum::WITNESS_SCRIPTHASH || type == AddressType::Enum::WITNESS_UNKNOWN ||
+                   type == AddressType::Enum::MULTISIG;
+        }
+
+        bool isJoinMarketCoinJoin(const Transaction &tx) {
+            if (isWasabi1CoinJoin(tx) || isWhirlpoolCoinJoin(tx) || isAshigaruCoinJoin(tx)) {
+                return false;
+            }
+
+            const auto &inputs = tx.inputs();
+            const auto &outputs = tx.outputs();
+
+            if (inputs.size() == 0 || outputs.size() == 0) {
+                return false;
+            }
+
+            // ---------------------------------------------------------
+            // 1. Reject OP_RETURN outputs
+            // ---------------------------------------------------------
+            std::unordered_map<int64_t, int> valueCounts;
+            for (const auto &o : outputs) {
+                if (o.getAddress().getType() == AddressType::Enum::NULL_DATA) {
+                    return false;
+                }
+                if (o.getType() == AddressType::Enum::NONSTANDARD) {
+                    return false;
+                }
+                valueCounts[o.getValue()]++;
+            }
+
+            // ---------------------------------------------------------
+            // 2. Find most common output value (the "mix amount")
+            // ---------------------------------------------------------
+            int maxCount = 0;
+            for (const auto &p : valueCounts) {
+                if (p.second > maxCount) {
+                    maxCount = p.second;
+                }
+            }
+
+            if (maxCount < 5) {
+                return false;
+            }
+
+            // Only one denomination is allowed to repeat (and only one value should have maxCount)
+            int maxCountValues = 0;  // Count how many different values have maxCount
+            for (const auto &p : valueCounts) {
+                if (p.second > 1 && p.second != maxCount) {
+                    return false;
+                }
+                if (p.second == maxCount) {
+                    maxCountValues++;
+                }
+            }
+
+            // Ensure only one value has the maximum count
+            if (maxCountValues != 1) {
+                return false;
+            }
+
+            // ---------------------------------------------------------
+            // 3. Input / Output sanity checks
+            // ---------------------------------------------------------
+            const size_t numIns = inputs.size();
+            const size_t numOuts = outputs.size();
+
+            // Basic structural sanity - JoinMarket needs reasonable input/output counts
+            if (numIns < 2 || numOuts < 3) {  // Minimum for any coinjoin
+                return false;
+            }
+
+            // Input-to-participant ratio should be reasonable (0.5 to 5.0)
+            double inputParticipantRatio = static_cast<double>(numIns) / maxCount;
+            if (inputParticipantRatio < 0.5 || inputParticipantRatio > 5.0) {
+                return false;  // Each participant typically contributes 1-3 inputs
+            }
+
+            // Outputs should not exceed twice the number of equal mix outputs
+            if (numOuts > (2 * maxCount + 1)) {
+                return false;
+            }
+
+            // ---------------------------------------------------------
+            // 4. Address reuse filter
+            // ---------------------------------------------------------
+            std::unordered_map<Address, int> scriptCounts;
+            for (const auto &i : inputs) {
+                scriptCounts[i.getAddress()]++;
+            }
+            for (const auto &o : outputs) {
+                scriptCounts[o.getAddress()]++;
+            }
+
+            int maxReuse = 0;
+            for (const auto &p : scriptCounts) {
+                if (p.second > maxReuse) {
+                    maxReuse = p.second;
+                }
+            }
+
+            if (maxReuse > 1) {
+                return false;
+            }
+
+            // ---------------------------------------------------------
+            // 5. Input/output uniqueness sanity
+            // ---------------------------------------------------------
+            std::unordered_set<Address> uniqueInputs;
+            for (const auto &i : inputs) {
+                uniqueInputs.insert(i.getAddress());
+            }
+            size_t minUniqueInputs = static_cast<size_t>(maxCount * 0.67);
+            if (uniqueInputs.size() < minUniqueInputs) {
+                return false;
+            }
+
+            std::unordered_set<Address> uniqueOutputs;
+            for (const auto &o : outputs) {
+                uniqueOutputs.insert(o.getAddress());
+            }
+            if (uniqueOutputs.size() != numOuts) {
+                return false;
+            }
+
+            // ---------------------------------------------------------
+            // 6. Change output count validation
+            // ---------------------------------------------------------
+            int64_t mixValue = 0;
+            for (const auto &p : valueCounts) {
+                if (p.second == maxCount) {
+                    mixValue = p.first;
+                    break;
+                }
+            }
+
+            // Mix value should be above dust threshold (10,000 satoshis minimum)
+            if (mixValue < 10000) {
+                return false;
+            }
+
+            int changeOutputCount = 0;
+            for (const auto &o : outputs) {
+                if (o.getValue() != mixValue) {
+                    changeOutputCount++;
+                    // Count suspiciously small change outputs (< 5000 sats)
+                    if (o.getValue() < 5000) {
+                        return false;
+                    }
+                }
+            }
+
+            // For N participants, allow 0 to N change outputs
+            // 0 = no participant has change (all inputs exactly equal mix amount)
+            // N = every participant has change
+            if (changeOutputCount < 0 || changeOutputCount > maxCount) {
+                return false;
+            }
+
+            // ---------------------------------------------------------
+            // 7. Script-type cohesion
+            // ---------------------------------------------------------
+            int segwitInputCount = 0;
+            for (const auto &i : inputs) {
+                if (isSegwitType(i.getType())) {
+                    segwitInputCount++;
+                }
+            }
+
+            double segwitFraction = static_cast<double>(segwitInputCount) / numIns;
+            if (segwitFraction < 0.3) {
+                return false;
+            }
+
+            // ---------------------------------------------------------
+            // If we got this far, it's a valid JoinMarket CoinJoin
+            // ---------------------------------------------------------
+            return true;
         }
 
         ConsolidationType getConsolidationType(const Transaction &tx, double inputOutputRatio) {
