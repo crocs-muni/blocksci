@@ -6,13 +6,15 @@
 #include <blocksci/cluster/cluster.hpp>
 #include <blocksci/heuristics/tx_identification.hpp>
 #include <blocksci/scripts/script_range.hpp>
+#include <optional>
 #include <queue>
-#include <unordered_map>
+#include <string>
+#include <unordered_set>
 
 #include "../external/json/single_include/nlohmann/json.hpp"
+#include "blocksci/chain/output.hpp"
 #include "caster_py.hpp"
 #include "sequence.hpp"
-#include <optional>
 
 struct CoinjoinNamespace {};
 
@@ -22,42 +24,147 @@ using namespace blocksci;
 using json = nlohmann::json;
 
 std::unordered_set<Transaction> findLinkedCjTxes(
-    int start, 
-    int stop, 
-    std::string coinjoinType,                                            
-    Blockchain &chain, 
-    std::optional<std::string> subtype = std::nullopt,
-    std::optional<std::unordered_set<std::string>> falsePositives = std::nullopt
-) {
-        auto txes = chain[{start, stop}].filter([&](const Transaction &tx) {
-            return blocksci::heuristics::isCoinjoinOfGivenType(tx, coinjoinType, subtype);
-        });
+    int start, int stop, std::string coinjoinType, Blockchain &chain, std::optional<std::string> subtype = std::nullopt,
+    std::optional<std::unordered_set<std::string>> falsePositives = std::nullopt,
+    std::optional<int> minInputCount = std::nullopt) {
+    auto txes = chain[{start, stop}].filter(
+        [&](const Transaction &tx) { return blocksci::heuristics::isCoinjoinOfGivenType(tx, coinjoinType, subtype); });
 
-        if (txes.empty()) {
-            return {};
+    if (txes.empty()) {
+        return {};
+    }
+
+    // filter txes which are not connected to any other coinjoin tx
+    std::unordered_set<Transaction> txSet;
+    for (const auto &tx : txes) {
+        txSet.insert(tx);
+    }
+
+    std::unordered_set<Transaction> result;
+    result.insert(txes[0]);
+
+    for (const auto &tx : txSet) {
+        if (falsePositives.has_value() &&
+            falsePositives.value().find(tx.getHash().GetHex()) != falsePositives.value().end()) {
+            continue;
         }
-
-        // filter txes which are not connected to any other coinjoin tx
-        std::unordered_set<Transaction> txSet;
-        for (const auto &tx : txes) {
-            txSet.insert(tx);
+        for (const auto &input : tx.inputs()) {
+            if (txSet.find(input.getSpentTx()) != txSet.end()) {
+                result.insert(tx);
+                if (minInputCount.has_value()) {
+                    for (const auto &output : tx.outputs()) {
+                        if (!output.isSpent()) continue;
+                        if (blocksci::heuristics::isCoinjoinOfGivenType(output.getSpendingTx().value(), coinjoinType,
+                                                                        subtype, minInputCount)) {
+                            result.insert(tx);
+                        }
+                    }
+                }
+                break;
+            }
         }
+    }
+    return result;
+}
 
-        std::unordered_set<Transaction> result;
-        result.insert(txes[0]);
+using LevelType = uint32_t;
+using ConsolidationTxCountType = std::unordered_set<Output>;
+using OneTxConsolidationType = std::unordered_map<Transaction, ConsolidationTxCountType>;
+using ConsolidationType = std::unordered_map<LevelType, OneTxConsolidationType>;
+using ConsolidationResultType = std::unordered_map<Transaction, ConsolidationType>;
 
-        for (const auto &tx : txSet) {
-            if (falsePositives.has_value() && falsePositives.value().find(tx.getHash().GetHex()) != falsePositives.value().end()) {
+ConsolidationResultType get_consolidations_for_tx(const Transaction &tx, int maxLevel, std::string coinjoinType) {
+    ConsolidationResultType result;
+    result[tx] = {};
+    if (!blocksci::heuristics::isCoinjoinOfGivenType(tx, coinjoinType)) {
+        return result;
+    }
+
+    // we build the first level of the consolidation tree by transactions that directly
+    // spend the outputs of the coinjoin tx and possibly consolidate them.
+    // Then we build other levels by merging the sets of outputs of the transactions in the previous level.
+    std::unordered_map<Transaction, std::unordered_set<Output>> seen;
+    std::unordered_set<Transaction> bfsProcessed;
+    std::queue<std::pair<const Transaction &, int>> bfsQueue;
+    std::unordered_map<int, std::unordered_set<Transaction>> txesByLevel;
+    bfsQueue.push({tx, 0});
+    bfsProcessed.insert(tx);
+    seen[tx] = {};
+
+    while (!bfsQueue.empty()) {
+        auto [currentTx, level] = bfsQueue.front();
+        bfsQueue.pop();
+        for (const auto &output : currentTx.outputs()) {
+            if (!output.isSpent()) continue;
+            auto spendingTx = output.getSpendingTx().value();
+            if (bfsProcessed.find(spendingTx) != bfsProcessed.end()) {
                 continue;
             }
-            for (const auto &input : tx.inputs()) {
-                if (txSet.find(input.getSpentTx()) != txSet.end()) {
-                    result.insert(tx);
-                    break;
+            bfsProcessed.insert(spendingTx);
+            bfsQueue.push({spendingTx, level + 1});
+            if (level + 1 > maxLevel) {
+                continue;
+            }
+            if (seen.find(spendingTx) == seen.end()) {
+                seen[spendingTx] = {};
+            }
+            if (txesByLevel.find(level) == txesByLevel.end()) {
+                txesByLevel[level] = {};
+            }
+            txesByLevel[level].insert(spendingTx);
+
+            for (const auto &input : spendingTx.inputs()) {
+                auto inputTx = input.getSpentTx();
+                // if the input tx is the base tx (coinjoin tx), then we add the output directly to this tx's result
+                if (inputTx == tx) {
+                    seen[spendingTx].insert(input.getSpentOutput());
+                    continue;
+                }
+
+                // as we go by levels (bfs), if we haven't seen the input tx, then it's out of the scope
+                if (seen.find(inputTx) == seen.end()) {
+                    continue;
+                }
+
+                // otherwise we say this tx from this level consolidates all outputs of the previous level
+                for (const auto &foundOutput : seen[inputTx]) {
+                    seen[spendingTx].insert(foundOutput);
                 }
             }
         }
-        return result;
+    }
+    for (const auto &[level, txes] : txesByLevel) {
+        for (const auto &processedTx : txes) {
+            if (result[tx].find(level) == result[tx].end()) {
+                result[tx][level] = {};
+            }
+            if (result[tx][level].find(processedTx) == result[tx][level].end()) {
+                result[tx][level][processedTx] = {};
+            }
+            result[tx][level][processedTx] = seen[processedTx];
+        }
+    }
+
+    return result;
+}
+
+ConsolidationResultType get_coinjoin_consolidations(Blockchain &chain, BlockHeight start, BlockHeight stop,
+                                                    std::string coinjoinType, int maxLevel) {
+    ConsolidationResultType result;
+
+    using MapType = ConsolidationResultType;
+    auto reduceFunc = [](MapType &our, MapType &their) -> MapType & {
+        for (const auto &[tx, consolidations] : their) {
+            our[tx] = consolidations;
+        }
+        return our;
+    };
+
+    auto mapFunc = [&](const Transaction &tx) -> MapType {
+        return get_consolidations_for_tx(tx, maxLevel, coinjoinType);
+    };
+
+    return chain[{start, stop}].mapReduce<MapType, decltype(mapFunc), decltype(reduceFunc)>(mapFunc, reduceFunc);
 }
 
 void init_coinjoin_module(py::class_<Blockchain> &cl) {
@@ -117,15 +224,15 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
           pybind11::arg("stop"))
         .def(
             "find_kruw_paths_to_bybit",
-            [](Blockchain &chain, BlockHeight start, BlockHeight stop, pybind11::set kruwTxIds, pybind11::set bybitAddresses,
-               int maxHops) {
-                std::unordered_set<Address> bybitAddressesSet = pybind11::cast<std::unordered_set<Address>>(bybitAddresses);
+            [](Blockchain &chain, BlockHeight start, BlockHeight stop, pybind11::set kruwTxIds,
+               pybind11::set bybitAddresses, int maxHops) {
+                std::unordered_set<Address> bybitAddressesSet =
+                    pybind11::cast<std::unordered_set<Address>>(bybitAddresses);
                 std::unordered_set<Transaction> kruwTxSet = pybind11::cast<std::unordered_set<Transaction>>(kruwTxIds);
                 std::cout << "KRUW txes: " << kruwTxSet.size() << std::endl;
                 std::cout << "Bybit addresses: " << bybitAddressesSet.size() << std::endl;
                 std::cout << "Max hops: " << maxHops << std::endl;
-                
-                
+
                 // MapType = <tx_hash, <address, <<path>>>>
                 using TxHashType = std::string;
                 using TxPathType = std::vector<TxHashType>;
@@ -146,12 +253,10 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                                 std::reverse(reversedPath.begin(), reversedPath.end());
                                 ourAddresses[address].push_back(reversedPath);
                             }
-
                         }
                     }
                     return our;
                 };
-                
 
                 auto mapFunc = [&](const Transaction &tx) -> MapType {
                     if (kruwTxSet.find(tx) == kruwTxSet.end()) {
@@ -199,25 +304,23 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                             visited.insert(inputTx);
                         }
                     }
-                    
-                    
+
                     return result;
                 };
 
                 return chain[{start, stop}].mapReduce<MapType, decltype(mapFunc), decltype(reduceFunc)>(mapFunc,
                                                                                                         reduceFunc);
             },
-            pybind11::arg("start"), pybind11::arg("stop"),
-            pybind11::arg("kruw_tx_ids"), pybind11::arg("bybit_addresses"), pybind11::arg("max_hops")
-        )
+            pybind11::arg("start"), pybind11::arg("stop"), pybind11::arg("kruw_tx_ids"),
+            pybind11::arg("bybit_addresses"), pybind11::arg("max_hops"))
         .def(
             "filter_coinjoin_txes",
-            [](Blockchain &chain, BlockHeight start, BlockHeight stop, std::string coinjoinType) {
-                return findLinkedCjTxes(start, stop, coinjoinType, chain);
-                
+            [](Blockchain &chain, BlockHeight start, BlockHeight stop, std::string coinjoinType,
+               std::optional<int> minInputCount) {
+                return findLinkedCjTxes(start, stop, coinjoinType, chain, std::nullopt, std::nullopt, minInputCount);
             },
             "Filter coinjoin transactions", pybind11::arg("start"), pybind11::arg("stop"),
-            pybind11::arg("coinjoin_type"))
+            pybind11::arg("coinjoin_type"), pybind11::arg("min_input_count") = std::nullopt)
         .def(
             "find_hw_sw_coinjoins",
             [](Blockchain &chain, BlockHeight start, BlockHeight stop) {
@@ -387,7 +490,8 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                             if (depth == 0) {
                                 bool allInputsFromCj = true;
                                 for (auto input : spendingTx.inputs()) {
-                                    if (!blocksci::heuristics::isCoinjoinOfGivenType(input.getSpentTx(), coinjoinType)) {
+                                    if (!blocksci::heuristics::isCoinjoinOfGivenType(input.getSpentTx(),
+                                                                                     coinjoinType)) {
                                         allInputsFromCj = false;
                                         break;
                                     }
@@ -424,38 +528,34 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                     return {{tx, result}};
                 };
 
-                return chain[{start, stop}].mapReduce<MapType, decltype(mapFunc), decltype(reduceFunc)>(mapFunc, reduceFunc);
+                return chain[{start, stop}].mapReduce<MapType, decltype(mapFunc), decltype(reduceFunc)>(mapFunc,
+                                                                                                        reduceFunc);
             },
             "Filter certain consolidation transactions", pybind11::arg("start"), pybind11::arg("stop"),
             pybind11::arg("input_output_ratio"), pybind11::arg("coinjoin_type"), pybind11::arg("hops"))
         .def(
             "compute_anonymity_degradation",
-            [](
-                Blockchain &chain, 
-                BlockHeight start, 
-                BlockHeight stop, 
-                int daysToConsider, 
-                std::string coinjoinType, 
-                std::optional<std::string> coinjoinSubType, 
-                bool ignoreNonStandardDenominations,
-                bool ignoreRemixes,
-                std::optional<std::tuple<int64_t, int64_t>> ww2DenomsBucket,
-		std::optional<std::unordered_set<std::string>> falseCoinjoins
-            ) {
+            [](Blockchain &chain, BlockHeight start, BlockHeight stop, int daysToConsider, std::string coinjoinType,
+               std::optional<std::string> coinjoinSubType, bool ignoreNonStandardDenominations, bool ignoreRemixes,
+               std::optional<std::tuple<int64_t, int64_t>> ww2DenomsBucket,
+               std::optional<std::unordered_set<std::string>> falseCoinjoins) {
                 std::unordered_map<std::string, std::unordered_set<Transaction>> cjsOfGivenType;
-                cjsOfGivenType["wasabi1"] = findLinkedCjTxes(start, stop, "wasabi1", chain, std::nullopt, falseCoinjoins);
-	    	cjsOfGivenType["wasabi2"] = findLinkedCjTxes(start, stop, "wasabi2", chain, std::nullopt, falseCoinjoins);
-                cjsOfGivenType["whirlpool"] = findLinkedCjTxes(start, stop, "whirlpool", chain, std::nullopt, falseCoinjoins);
+                cjsOfGivenType["wasabi1"] =
+                    findLinkedCjTxes(start, stop, "wasabi1", chain, std::nullopt, falseCoinjoins);
+                cjsOfGivenType["wasabi2"] =
+                    findLinkedCjTxes(start, stop, "wasabi2", chain, std::nullopt, falseCoinjoins);
+                cjsOfGivenType["whirlpool"] =
+                    findLinkedCjTxes(start, stop, "whirlpool", chain, std::nullopt, falseCoinjoins);
                 if (coinjoinSubType.has_value()) {
-                    cjsOfGivenType[coinjoinSubType.value()] = findLinkedCjTxes(start, stop, coinjoinType, chain, coinjoinSubType.value(), falseCoinjoins);
+                    cjsOfGivenType[coinjoinSubType.value()] =
+                        findLinkedCjTxes(start, stop, coinjoinType, chain, coinjoinSubType.value(), falseCoinjoins);
                 }
-
 
                 // CJTX and its anonymity sets
                 using AnonymitySetsFuncType = std::unordered_map<Transaction, std::unordered_map<int64_t, int64_t>>;
-                // For txes which consolidate inputs from multiple cjtxes. CJTX = Transaction, map = <value, count>
-                // value = the anonymity set, count = how many times it appears in the consolidation tx (how much it
-                // degrades the anonymity set)
+                // For txes which consolidate inputs from multiple cjtxes. CJTX = Transaction, map = <value,
+                // count> value = the anonymity set, count = how many times it appears in the consolidation tx
+                // (how much it degrades the anonymity set)
                 using PointingToTransactionsType =
                     std::unordered_map<Transaction, std::unordered_map<int64_t, int64_t>>;
 
@@ -477,16 +577,17 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                         return outputValue > 0.12 * 1e8 || outputValue < 0.08 * 1e8;
                     }
                     if (coinjoinType == "wasabi2") {
-                        return CoinjoinUtils::ww2_denominations.find(outputValue) == CoinjoinUtils::ww2_denominations.end();
+                        return CoinjoinUtils::ww2_denominations.find(outputValue) ==
+                               CoinjoinUtils::ww2_denominations.end();
                     }
 
                     return false;
-                    
                 };
 
                 auto getSizesOfAnonymitySetsPerOutput = [&](const Transaction &tx) -> AnonymitySetsFuncType {
                     if (coinjoinSubType.has_value()) {
-                        if (cjsOfGivenType[coinjoinSubType.value()].find(tx) == cjsOfGivenType[coinjoinSubType.value()].end()) {
+                        if (cjsOfGivenType[coinjoinSubType.value()].find(tx) ==
+                            cjsOfGivenType[coinjoinSubType.value()].end()) {
                             return {};
                         }
                     } else {
@@ -507,21 +608,20 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                                 continue;
                             }
                             auto spendingTx = output.getSpendingTx().value();
-                            if (ignoreRemixes && !(cjsOfGivenType["wasabi1"].find(spendingTx) == cjsOfGivenType["wasabi1"].end() &&
-                                cjsOfGivenType["wasabi2"].find(spendingTx) == cjsOfGivenType["wasabi2"].end() &&
-                                cjsOfGivenType["whirlpool"].find(spendingTx) == cjsOfGivenType["whirlpool"].end())) {
+                            if (ignoreRemixes &&
+                                !(cjsOfGivenType["wasabi1"].find(spendingTx) == cjsOfGivenType["wasabi1"].end() &&
+                                  cjsOfGivenType["wasabi2"].find(spendingTx) == cjsOfGivenType["wasabi2"].end() &&
+                                  cjsOfGivenType["whirlpool"].find(spendingTx) == cjsOfGivenType["whirlpool"].end())) {
                                 continue;
                             }
-
-                        }                         
+                        }
                         if (shouldIgnoreDenomination(output.getValue())) {
                             continue;
                         }
-                        
 
                         if (anonymitySets.find(output.getValue()) == anonymitySets.end()) {
                             anonymitySets[output.getValue()] = 0;
-                        } 
+                        }
                         anonymitySets[output.getValue()]++;
                         sum++;
                     }
@@ -532,12 +632,12 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                 };
 
                 auto combineAnonymitySetSizes = [](AnonymitySetsFuncType &map1,
-                                     AnonymitySetsFuncType &map2) -> AnonymitySetsFuncType & {
+                                                   AnonymitySetsFuncType &map2) -> AnonymitySetsFuncType & {
                     for (const auto &[key, value] : map2) {
                         if (map1.find(key) == map1.end()) {
                             map1[key] = value;
                             continue;
-                        } 
+                        }
                         for (const auto &[key2, value2] : value) {
                             if (map1[key].find(key2) == map1[key].end()) {
                                 map1[key][key2] = value2;
@@ -550,15 +650,17 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                 };
 
                 auto initialAnonymitySets =
-                    chain[{start, stop}].mapReduce<AnonymitySetsFuncType, decltype(getSizesOfAnonymitySetsPerOutput), decltype(combineAnonymitySetSizes)>(
-                        getSizesOfAnonymitySetsPerOutput, combineAnonymitySetSizes);
+                    chain[{start, stop}]
+                        .mapReduce<AnonymitySetsFuncType, decltype(getSizesOfAnonymitySetsPerOutput),
+                                   decltype(combineAnonymitySetSizes)>(getSizesOfAnonymitySetsPerOutput,
+                                                                       combineAnonymitySetSizes);
 
                 auto decreaseAnonymityIfConsolidated = [&](const Transaction &tx) -> PointingToTransactionsType {
                     PointingToTransactionsType result;
                     // if it _is_ coinjoin and we ignore remixes
                     if (!(cjsOfGivenType["wasabi1"].find(tx) == cjsOfGivenType["wasabi1"].end() &&
-                        cjsOfGivenType["wasabi2"].find(tx) == cjsOfGivenType["wasabi2"].end() &&
-                        cjsOfGivenType["whirlpool"].find(tx) == cjsOfGivenType["whirlpool"].end())) {
+                          cjsOfGivenType["wasabi2"].find(tx) == cjsOfGivenType["wasabi2"].end() &&
+                          cjsOfGivenType["whirlpool"].find(tx) == cjsOfGivenType["whirlpool"].end())) {
                         return {};
                     }
 
@@ -597,8 +699,9 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                     return sum > 1 ? result : PointingToTransactionsType{};
                 };
 
-                auto combineDataAfterAnonymityLoss = [&](PointingToTransactionsType &map1,
-                                       PointingToTransactionsType &map2) -> PointingToTransactionsType & {
+                auto combineDataAfterAnonymityLoss =
+                    [&](PointingToTransactionsType &map1,
+                        PointingToTransactionsType &map2) -> PointingToTransactionsType & {
                     for (const auto &[tx, anonymitySets] : map2) {
                         if (map1.find(tx) == map1.end()) {
                             map1[tx] = anonymitySets;
@@ -617,8 +720,9 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                 if (daysToConsider > 0) {
                     auto pointingToTransactions =
                         chain[{start, stop}]
-                            .mapReduce<PointingToTransactionsType, decltype(decreaseAnonymityIfConsolidated), decltype(combineDataAfterAnonymityLoss)>(
-                                decreaseAnonymityIfConsolidated, combineDataAfterAnonymityLoss);
+                            .mapReduce<PointingToTransactionsType, decltype(decreaseAnonymityIfConsolidated),
+                                       decltype(combineDataAfterAnonymityLoss)>(decreaseAnonymityIfConsolidated,
+                                                                                combineDataAfterAnonymityLoss);
 
                     for (const auto &[tx, anonymitySets] : pointingToTransactions) {
                         for (const auto &[value, count] : anonymitySets) {
@@ -655,7 +759,7 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
                             notRemixedNotIgnoredOutputs++;
                         }
                     }
-                    
+
                     for (const auto &[key, value] : anonymitySets) {
                         // resultValue += lgamma(value + 1) / log(2);
                         totalCount += value;
@@ -672,9 +776,10 @@ void init_coinjoin_module(py::class_<Blockchain> &cl) {
 
                 return result;
             },
-            "Compute anonymity degradation in coinjoins. Ignore remixes by default", pybind11::arg("start"), pybind11::arg("stop"),
-            pybind11::arg("daysToConsider"), pybind11::arg("coinjoinType"), pybind11::arg("coinjoinSubType") = py::none(), pybind11::arg("ignoreNonStandardDenominations") = false,
-            pybind11::arg("ignoreRemixes") = true, pybind11::arg("ww2DenomsBucket") = py::none(), pybind11::arg("falseCoinjoins") = py::none()
-        );
+            "Compute anonymity degradation in coinjoins. Ignore remixes by default", pybind11::arg("start"),
+            pybind11::arg("stop"), pybind11::arg("daysToConsider"), pybind11::arg("coinjoinType"),
+            pybind11::arg("coinjoinSubType") = py::none(), pybind11::arg("ignoreNonStandardDenominations") = false,
+            pybind11::arg("ignoreRemixes") = true, pybind11::arg("ww2DenomsBucket") = py::none(),
+            pybind11::arg("falseCoinjoins") = py::none());
     ;
 }

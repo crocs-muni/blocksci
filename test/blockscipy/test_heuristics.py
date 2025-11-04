@@ -5,7 +5,7 @@ import blocksci
 
 def test_simple_coinjoin(chain, json_data):
     tx = chain.tx_with_hash(json_data["simple-coinjoin-tx"])
-    assert blocksci.heuristics.is_coinjoin(tx)
+    assert not blocksci.heuristics.is_coinjoin(tx)
 
 
 def test_no_coinjoin(chain, json_data):

@@ -125,7 +125,8 @@ void init_coinjoin_cluster_manager(pybind11::module &s) {
             "- 'none': No coinjoin type is used\n"
             "- 'wasabi2': Wasabi CoinJoin type 2\n"
             "- 'wasabi1': Wasabi CoinJoin type 1\n"
-            "- 'whirlpool': Whirlpool CoinJoin\n\n"
+            "- 'whirlpool': Whirlpool CoinJoin\n"
+            "- 'ashigaru': Ashigaru CoinJoin\n\n"
             "The max_distance parameter specifies the maximum distance from a coinjoin transaction to collect "
             "addresses, where 0 means only the coinjoin transaction itself, 1 means the coinjoin transaction and its "
             "direct neighbors, etc.");

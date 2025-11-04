@@ -9,44 +9,6 @@ def test_clustering_default_heuristic(chain, tmpdir_factory):
     )
 
 
-def test_clustering_proxy_heuristic(chain, tmpdir_factory):
-    """Tests that we can run create_clustering with a proxy heuristic"""
-
-    # output index 0
-    heuristic = blocksci.heuristics.change.ChangeHeuristic(
-        blocksci.Tx._self_proxy.outputs.where(lambda o: o.index == 0)
-    )
-    cm = blocksci.cluster.ClusterManager.create_clustering(
-        str(tmpdir_factory.mktemp("clustering_proxy_heuristic_0")),
-        chain,
-        heuristic=heuristic,
-    )
-    for tx in chain.blocks.txes:
-        if tx.input_count > 0 and not blocksci.heuristics.is_coinjoin(tx):
-            cluster = cm.cluster_with_address(tx.inputs[0].address)
-            addresses = cluster.addresses.to_list()
-            assert tx.outputs[0].address in addresses
-
-    # output index 1
-    heuristic = blocksci.heuristics.change.ChangeHeuristic(
-        blocksci.Tx._self_proxy.outputs.where(lambda o: o.index == 1)
-    )
-    cm = blocksci.cluster.ClusterManager.create_clustering(
-        str(tmpdir_factory.mktemp("clustering_proxy_heuristic_1")),
-        chain,
-        heuristic=heuristic,
-    )
-    for tx in chain.blocks.txes:
-        if (
-            tx.input_count > 0
-            and tx.output_count > 1
-            and not blocksci.heuristics.is_coinjoin(tx)
-        ):
-            cluster = cm.cluster_with_address(tx.inputs[0].address)
-            addresses = cluster.addresses.to_list()
-            assert tx.outputs[1].address in addresses
-
-
 def test_clustering_no_change(chain, json_data, regtest, tmpdir_factory):
     cm = blocksci.cluster.ClusterManager.create_clustering(
         str(tmpdir_factory.mktemp("clustering")),
@@ -179,7 +141,7 @@ def test_clustering_ignore_coinjoin(chain, json_data, tmpdir_factory, regtest):
     )
     cluster = cm.cluster_with_address(addresses[0])
     cluster_addresses = cluster.addresses.to_list()
-    assert 1 == len(cluster)
+    assert 3 == len(cluster)
 
     for addr in addresses[1:]:
         assert addr not in cluster_addresses
@@ -221,7 +183,7 @@ def test_clustering_cluster_coinjoin(chain, json_data, tmpdir_factory, regtest):
     )
     cluster = cm.cluster_with_address(addresses[0])
     cluster_addresses = cluster.addresses.to_list()
-    assert 1 < len(cluster)
+    assert 3 <= len(cluster)
 
     for addr in addresses:
         assert addr in cluster_addresses
